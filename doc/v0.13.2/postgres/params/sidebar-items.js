@@ -1,0 +1,1 @@
+initSidebarItems({"enum":[["ConnectTarget","Specifies the target server to connect to."]],"struct":[["ConnectParams","Information necessary to open a new connection to a Postgres server."],["UserInfo","Authentication information."]],"trait":[["IntoConnectParams","A trait implemented by types that can be converted into a `ConnectParams`."]]});

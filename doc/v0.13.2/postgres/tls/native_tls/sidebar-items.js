@@ -1,0 +1,1 @@
+initSidebarItems({"struct":[["NativeTls","A `TlsHandshake` implementation that uses the native-tls crate."]]});
