@@ -17,11 +17,16 @@ use bytes::{BufMut, BytesMut};
 use std::io;
 
 pub mod authentication;
+pub mod escape;
 pub mod message;
+pub mod password;
 pub mod types;
 
 /// A Postgres OID.
 pub type Oid = u32;
+
+/// A Postgres Log Sequence Number (LSN).
+pub type Lsn = u64;
 
 /// An enum indicating if a value is `NULL` or not.
 pub enum IsNull {

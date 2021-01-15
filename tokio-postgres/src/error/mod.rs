@@ -309,7 +309,14 @@ impl DbError {
 
 impl fmt::Display for DbError {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(fmt, "{}: {}", self.severity, self.message)
+        write!(fmt, "{}: {}", self.severity, self.message)?;
+        if let Some(detail) = &self.detail {
+            write!(fmt, "\nDETAIL: {}", detail)?;
+        }
+        if let Some(hint) = &self.hint {
+            write!(fmt, "\nHINT: {}", hint)?;
+        }
+        Ok(())
     }
 }
 
@@ -347,6 +354,7 @@ enum Kind {
     RowCount,
     #[cfg(feature = "runtime")]
     Connect,
+    Timeout,
 }
 
 struct ErrorInner {
@@ -385,6 +393,7 @@ impl fmt::Display for Error {
             Kind::RowCount => fmt.write_str("query returned an unexpected number of rows")?,
             #[cfg(feature = "runtime")]
             Kind::Connect => fmt.write_str("error connecting to server")?,
+            Kind::Timeout => fmt.write_str("timeout waiting for server")?,
         };
         if let Some(ref cause) = self.0.cause {
             write!(fmt, ": {}", cause)?;
@@ -483,5 +492,10 @@ impl Error {
     #[cfg(feature = "runtime")]
     pub(crate) fn connect(e: io::Error) -> Error {
         Error::new(Kind::Connect, Some(Box::new(e)))
+    }
+
+    #[doc(hidden)]
+    pub fn __private_api_timeout() -> Error {
+        Error::new(Kind::Timeout, None)
     }
 }

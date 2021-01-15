@@ -130,6 +130,9 @@ use crate::type_gen::{Inner, Other};
 #[doc(inline)]
 pub use postgres_protocol::Oid;
 
+#[doc(inline)]
+pub use pg_lsn::PgLsn;
+
 pub use crate::special::{Date, Timestamp};
 use bytes::BytesMut;
 
@@ -144,10 +147,7 @@ const NSEC_PER_USEC: u64 = 1_000;
 macro_rules! accepts {
     ($($expected:ident),+) => (
         fn accepts(ty: &$crate::Type) -> bool {
-            match *ty {
-                $($crate::Type::$expected)|+ => true,
-                _ => false
-            }
+            matches!(*ty, $($crate::Type::$expected)|+)
         }
     )
 }
@@ -194,8 +194,6 @@ mod bit_vec_06;
 mod chrono_04;
 #[cfg(feature = "with-eui48-0_4")]
 mod eui48_04;
-#[cfg(feature = "with-geo-types-0_4")]
-mod geo_types_04;
 #[cfg(feature = "with-geo-types-0_6")]
 mod geo_types_06;
 #[cfg(feature = "with-serde_json-1")]
@@ -209,6 +207,7 @@ mod uuid_08;
 #[cfg(feature = "with-time-0_2")]
 extern crate time_02 as time;
 
+mod pg_lsn;
 #[doc(hidden)]
 pub mod private;
 mod special;
@@ -952,5 +951,38 @@ fn downcast(len: usize) -> Result<i32, Box<dyn Error + Sync + Send>> {
         Err("value too large to transmit".into())
     } else {
         Ok(len as i32)
+    }
+}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// A trait used by clients to abstract over `&dyn ToSql` and `T: ToSql`.
+///
+/// This cannot be implemented outside of this crate.
+pub trait BorrowToSql: sealed::Sealed {
+    /// Returns a reference to `self` as a `ToSql` trait object.
+    fn borrow_to_sql(&self) -> &dyn ToSql;
+}
+
+impl sealed::Sealed for &dyn ToSql {}
+
+impl BorrowToSql for &dyn ToSql {
+    #[inline]
+    fn borrow_to_sql(&self) -> &dyn ToSql {
+        *self
+    }
+}
+
+impl<T> sealed::Sealed for T where T: ToSql {}
+
+impl<T> BorrowToSql for T
+where
+    T: ToSql,
+{
+    #[inline]
+    fn borrow_to_sql(&self) -> &dyn ToSql {
+        self
     }
 }

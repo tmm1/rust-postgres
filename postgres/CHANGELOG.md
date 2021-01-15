@@ -1,5 +1,37 @@
 # Change Log
 
+## v0.19.0 - 2020-12-25
+
+### Changed
+
+* Upgraded to `tokio-postgres` 0.7.
+* Methods taking iterators of `ToSql` values can now take both `&dyn ToSql` and `T: ToSql` values.
+
+### Added
+
+* Added `Client::is_valid` which can be used to check that the connection is still alive with a
+    timeout.
+
+## v0.18.1 - 2020-10-19
+
+### Fixed
+
+* Restored the `Send` implementation for `Client`.
+
+## v0.18.0 - 2020-10-17
+
+### Changed
+
+* Upgraded to `tokio-postgres` 0.6.
+
+### Added
+
+* Added `Config::notice_callback`, which can be used to provide a custom callback for notices.
+
+### Fixed
+
+* Fixed client shutdown to explicitly terminate the database session.
+
 ## v0.17.5 - 2020-07-19
 
 ### Fixed
@@ -49,7 +81,7 @@
 * `Client::query_raw` now returns a named type.
 * `Client::copy_in` and `Client::copy_out` no longer take query parameters as PostgreSQL doesn't support them in COPY
     queries.
-    
+
 ### Removed
 
 * Removed support for `uuid` 0.7.

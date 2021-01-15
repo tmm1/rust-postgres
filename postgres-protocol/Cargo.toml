@@ -1,6 +1,6 @@
 [package]
 name = "postgres-protocol"
-version = "0.5.2"
+version = "0.6.0"
 authors = ["Steven Fackler <sfackler@gmail.com>"]
 edition = "2018"
 description = "Low level Postgres protocol APIs"
@@ -9,13 +9,13 @@ repository = "https://github.com/sfackler/rust-postgres"
 readme = "../README.md"
 
 [dependencies]
-base64 = "0.12"
+base64 = "0.13"
 byteorder = "1.0"
-bytes = "0.5"
+bytes = "1.0"
 fallible-iterator = "0.2"
-hmac = "0.8"
-md5 = "0.7"
+hmac = "0.10"
+md-5 = "0.9"
 memchr = "2.0"
-rand = "0.7"
+rand = "0.8"
 sha2 = "0.9"
 stringprep = "0.1"

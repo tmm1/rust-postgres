@@ -39,27 +39,26 @@
 //! # Ok(())
 //! # }
 //! ```
-#![doc(html_root_url = "https://docs.rs/postgres-openssl/0.3")]
 #![warn(rust_2018_idioms, clippy::all, missing_docs)]
 
-use bytes::{Buf, BufMut};
 #[cfg(feature = "runtime")]
 use openssl::error::ErrorStack;
 use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
 #[cfg(feature = "runtime")]
 use openssl::ssl::SslConnector;
-use openssl::ssl::{ConnectConfiguration, SslRef};
-use std::fmt::Debug;
+use openssl::ssl::{self, ConnectConfiguration, SslRef};
+use openssl::x509::X509VerifyResult;
+use std::error::Error;
+use std::fmt::{self, Debug};
 use std::future::Future;
 use std::io;
-use std::mem::MaybeUninit;
 use std::pin::Pin;
 #[cfg(feature = "runtime")]
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_openssl::{HandshakeError, SslStream};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio_openssl::SslStream;
 use tokio_postgres::tls;
 #[cfg(feature = "runtime")]
 use tokio_postgres::tls::MakeTlsConnect;
@@ -133,20 +132,52 @@ impl TlsConnector {
 
 impl<S> TlsConnect<S> for TlsConnector
 where
-    S: AsyncRead + AsyncWrite + Unpin + Debug + 'static + Sync + Send,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     type Stream = TlsStream<S>;
-    type Error = HandshakeError<S>;
+    type Error = Box<dyn Error + Send + Sync>;
     #[allow(clippy::type_complexity)]
-    type Future = Pin<Box<dyn Future<Output = Result<TlsStream<S>, HandshakeError<S>>> + Send>>;
+    type Future = Pin<Box<dyn Future<Output = Result<TlsStream<S>, Self::Error>> + Send>>;
 
     fn connect(self, stream: S) -> Self::Future {
         let future = async move {
-            let stream = tokio_openssl::connect(self.ssl, &self.domain, stream).await?;
-            Ok(TlsStream(stream))
+            let ssl = self.ssl.into_ssl(&self.domain)?;
+            let mut stream = SslStream::new(ssl, stream)?;
+            match Pin::new(&mut stream).connect().await {
+                Ok(()) => Ok(TlsStream(stream)),
+                Err(error) => Err(Box::new(ConnectError {
+                    error,
+                    verify_result: stream.ssl().verify_result(),
+                }) as _),
+            }
         };
 
         Box::pin(future)
+    }
+}
+
+#[derive(Debug)]
+struct ConnectError {
+    error: ssl::Error,
+    verify_result: X509VerifyResult,
+}
+
+impl fmt::Display for ConnectError {
+    fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, fmt)?;
+
+        if self.verify_result != X509VerifyResult::OK {
+            fmt.write_str(": ")?;
+            fmt::Display::fmt(&self.verify_result, fmt)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Error for ConnectError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(&self.error)
     }
 }
 
@@ -157,27 +188,12 @@ impl<S> AsyncRead for TlsStream<S>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    unsafe fn prepare_uninitialized_buffer(&self, buf: &mut [MaybeUninit<u8>]) -> bool {
-        self.0.prepare_uninitialized_buffer(buf)
-    }
-
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         Pin::new(&mut self.0).poll_read(cx, buf)
-    }
-
-    fn poll_read_buf<B: BufMut>(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut B,
-    ) -> Poll<io::Result<usize>>
-    where
-        Self: Sized,
-    {
-        Pin::new(&mut self.0).poll_read_buf(cx, buf)
     }
 }
 
@@ -199,17 +215,6 @@ where
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.0).poll_shutdown(cx)
-    }
-
-    fn poll_write_buf<B: Buf>(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut B,
-    ) -> Poll<io::Result<usize>>
-    where
-        Self: Sized,
-    {
-        Pin::new(&mut self.0).poll_write_buf(cx, buf)
     }
 }
 

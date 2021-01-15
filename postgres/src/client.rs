@@ -3,14 +3,22 @@ use crate::{
     CancelToken, Config, CopyInWriter, CopyOutReader, Notifications, RowIter, Statement,
     ToStatement, Transaction, TransactionBuilder,
 };
+use std::task::Poll;
+use std::time::Duration;
 use tokio_postgres::tls::{MakeTlsConnect, TlsConnect};
-use tokio_postgres::types::{ToSql, Type};
+use tokio_postgres::types::{BorrowToSql, ToSql, Type};
 use tokio_postgres::{Error, Row, SimpleQueryMessage, Socket};
 
 /// A synchronous PostgreSQL client.
 pub struct Client {
     connection: Connection,
     client: tokio_postgres::Client,
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        let _ = self.close_inner();
+    }
 }
 
 impl Client {
@@ -220,7 +228,7 @@ impl Client {
     /// let mut client = Client::connect("host=localhost user=postgres", NoTls)?;
     ///
     /// let baz = true;
-    /// let mut it = client.query_raw("SELECT foo FROM bar WHERE baz = $1", iter::once(&baz as _))?;
+    /// let mut it = client.query_raw("SELECT foo FROM bar WHERE baz = $1", iter::once(baz))?;
     ///
     /// while let Some(row) = it.next()? {
     ///     let foo: i32 = row.get("foo");
@@ -246,7 +254,7 @@ impl Client {
     /// ];
     /// let mut it = client.query_raw(
     ///     "SELECT foo FROM bar WHERE biz = $1 AND baz = $2",
-    ///     params.iter().map(|p| p as &dyn ToSql),
+    ///     params,
     /// )?;
     ///
     /// while let Some(row) = it.next()? {
@@ -256,10 +264,11 @@ impl Client {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn query_raw<'a, T, I>(&mut self, query: &T, params: I) -> Result<RowIter<'_>, Error>
+    pub fn query_raw<T, P, I>(&mut self, query: &T, params: I) -> Result<RowIter<'_>, Error>
     where
         T: ?Sized + ToStatement,
-        I: IntoIterator<Item = &'a dyn ToSql>,
+        P: BorrowToSql,
+        I: IntoIterator<Item = P>,
         I::IntoIter: ExactSizeIterator,
     {
         let stream = self
@@ -405,6 +414,20 @@ impl Client {
         self.connection.block_on(self.client.simple_query(query))
     }
 
+    /// Validates the connection by performing a simple no-op query.
+    ///
+    /// If the specified timeout is reached before the backend responds, an error will be returned.
+    pub fn is_valid(&mut self, timeout: Duration) -> Result<(), Error> {
+        let inner_client = &self.client;
+        self.connection.block_on(async {
+            let trivial_query = inner_client.simple_query("");
+            tokio::time::timeout(timeout, trivial_query)
+                .await
+                .map_err(|_| Error::__private_api_timeout())?
+                .map(|_| ())
+        })
+    }
+
     /// Executes a sequence of SQL statements using the simple query protocol.
     ///
     /// Statements should be separated by semicolons. If an error occurs, execution of the sequence will stop at that
@@ -523,5 +546,25 @@ impl Client {
     /// If this returns `true`, the client is no longer usable.
     pub fn is_closed(&self) -> bool {
         self.client.is_closed()
+    }
+
+    /// Closes the client's connection to the server.
+    ///
+    /// This is equivalent to `Client`'s `Drop` implementation, except that it returns any error encountered to the
+    /// caller.
+    pub fn close(mut self) -> Result<(), Error> {
+        self.close_inner()
+    }
+
+    fn close_inner(&mut self) -> Result<(), Error> {
+        self.client.__private_api_close();
+
+        self.connection.poll_block_on(|_, _, done| {
+            if done {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        })
     }
 }

@@ -1,24 +1,30 @@
 use crate::{Error, Notification};
 use futures::future;
 use futures::{pin_mut, Stream};
-use log::info;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::runtime::Runtime;
+use tokio_postgres::error::DbError;
 use tokio_postgres::AsyncMessage;
 
 pub struct Connection {
     runtime: Runtime,
     connection: Pin<Box<dyn Stream<Item = Result<AsyncMessage, Error>> + Send>>,
     notifications: VecDeque<Notification>,
+    notice_callback: Arc<dyn Fn(DbError) + Sync + Send>,
 }
 
 impl Connection {
-    pub fn new<S, T>(runtime: Runtime, connection: tokio_postgres::Connection<S, T>) -> Connection
+    pub fn new<S, T>(
+        runtime: Runtime,
+        connection: tokio_postgres::Connection<S, T>,
+        notice_callback: Arc<dyn Fn(DbError) + Sync + Send>,
+    ) -> Connection
     where
         S: AsyncRead + AsyncWrite + Unpin + 'static + Send,
         T: AsyncRead + AsyncWrite + Unpin + 'static + Send,
@@ -27,6 +33,7 @@ impl Connection {
             runtime,
             connection: Box::pin(ConnectionStream { connection }),
             notifications: VecDeque::new(),
+            notice_callback,
         }
     }
 
@@ -38,7 +45,8 @@ impl Connection {
     where
         F: FnOnce() -> T,
     {
-        self.runtime.enter(f)
+        let _guard = self.runtime.enter();
+        f()
     }
 
     pub fn block_on<F, T>(&mut self, future: F) -> Result<T, Error>
@@ -55,6 +63,7 @@ impl Connection {
     {
         let connection = &mut self.connection;
         let notifications = &mut self.notifications;
+        let notice_callback = &mut self.notice_callback;
         self.runtime.block_on({
             future::poll_fn(|cx| {
                 let done = loop {
@@ -63,7 +72,7 @@ impl Connection {
                             notifications.push_back(notification);
                         }
                         Poll::Ready(Some(Ok(AsyncMessage::Notice(notice)))) => {
-                            info!("{}: {}", notice.severity(), notice.message());
+                            notice_callback(notice)
                         }
                         Poll::Ready(Some(Ok(_))) => {}
                         Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(e)),

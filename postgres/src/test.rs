@@ -1,4 +1,6 @@
 use std::io::{Read, Write};
+use std::str::FromStr;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use tokio_postgres::error::SqlState;
@@ -474,4 +476,35 @@ fn notifications_timeout_iter() {
     assert_eq!(notifications.len(), 2);
     assert_eq!(notifications[0].payload(), "hello");
     assert_eq!(notifications[1].payload(), "world");
+}
+
+#[test]
+fn notice_callback() {
+    let (notice_tx, notice_rx) = mpsc::sync_channel(64);
+    let mut client = Config::from_str("host=localhost port=5433 user=postgres")
+        .unwrap()
+        .notice_callback(move |n| notice_tx.send(n).unwrap())
+        .connect(NoTls)
+        .unwrap();
+
+    client
+        .batch_execute("DO $$BEGIN RAISE NOTICE 'custom'; END$$")
+        .unwrap();
+
+    assert_eq!(notice_rx.recv().unwrap().message(), "custom");
+}
+
+#[test]
+fn explicit_close() {
+    let client = Client::connect("host=localhost port=5433 user=postgres", NoTls).unwrap();
+    client.close().unwrap();
+}
+
+#[test]
+fn check_send() {
+    fn is_send<T: Send>() {}
+
+    is_send::<Client>();
+    is_send::<Statement>();
+    is_send::<Transaction<'_>>();
 }

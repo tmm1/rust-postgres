@@ -1,5 +1,4 @@
 use crate::{FromSql, IsNull, ToSql, Type};
-use bytes::buf::BufMutExt;
 use bytes::{BufMut, BytesMut};
 use serde_1::{Deserialize, Serialize};
 use serde_json_1::Value;
@@ -8,7 +7,7 @@ use std::fmt::Debug;
 use std::io::Read;
 
 /// A wrapper type to allow arbitrary `Serialize`/`Deserialize` types to convert to Postgres JSON values.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Json<T>(pub T);
 
 impl<'a, T> FromSql<'a> for Json<T>
