@@ -49,7 +49,8 @@ impl Statement {
         }))
     }
 
-    pub(crate) fn name(&self) -> &str {
+    /// Returns the name of the statement.
+    pub fn name(&self) -> &str {
         &self.0.name
     }
 
@@ -68,11 +69,26 @@ impl Statement {
 pub struct Column {
     name: String,
     type_: Type,
+    column_id: Option<i16>,
+    table_oid: Option<u32>,
 }
 
 impl Column {
-    pub(crate) fn new(name: String, type_: Type) -> Column {
-        Column { name, type_ }
+    pub(crate) fn new(name: String, type_: Type, column_id: i16, table_oid: u32) -> Column {
+        Column {
+            name,
+            type_,
+            column_id: if column_id == 0 {
+                None
+            } else {
+                Some(column_id)
+            },
+            table_oid: if table_oid == 0 {
+                None
+            } else {
+                Some(table_oid)
+            },
+        }
     }
 
     /// Returns the name of the column.
@@ -83,6 +99,16 @@ impl Column {
     /// Returns the type of the column.
     pub fn type_(&self) -> &Type {
         &self.type_
+    }
+
+    /// Returns the id of the column if there's one.
+    pub fn column_id(&self) -> Option<i16> {
+        self.column_id
+    }
+
+    /// Returns the table_oid of the column if there's one.
+    pub fn table_oid(&self) -> Option<u32> {
+        self.table_oid
     }
 }
 
