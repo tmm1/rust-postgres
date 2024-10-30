@@ -57,10 +57,6 @@ impl Client {
     /// repeatedly executed (perhaps with different query parameters), consider preparing the statement up front
     /// with the `prepare` method.
     ///
-    /// # Panics
-    ///
-    /// Panics if the number of parameters provided does not match the number expected.
-    ///
     /// # Example
     ///
     /// ```no_run
@@ -96,10 +92,6 @@ impl Client {
     /// repeatedly executed (perhaps with different query parameters), consider preparing the statement up front
     /// with the `prepare` method.
     ///
-    /// # Panics
-    ///
-    /// Panics if the number of parameters provided does not match the number expected.
-    ///
     /// # Examples
     ///
     /// ```no_run
@@ -134,10 +126,6 @@ impl Client {
     /// repeatedly executed (perhaps with different query parameters), consider preparing the statement up front
     /// with the `prepare` method.
     ///
-    /// # Panics
-    ///
-    /// Panics if the number of parameters provided does not match the number expected.
-    ///
     /// # Examples
     ///
     /// ```no_run
@@ -171,10 +159,6 @@ impl Client {
     /// The `query` argument can either be a `Statement`, or a raw query string. If the same statement will be
     /// repeatedly executed (perhaps with different query parameters), consider preparing the statement up front
     /// with the `prepare` method.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the number of parameters provided does not match the number expected.
     ///
     /// # Examples
     ///
@@ -212,10 +196,6 @@ impl Client {
     ///
     /// It takes an iterator of parameters rather than a slice, and returns an iterator of rows rather than collecting
     /// them into an array.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the number of parameters provided does not match the number expected.
     ///
     /// # Examples
     ///
@@ -274,6 +254,71 @@ impl Client {
         let stream = self
             .connection
             .block_on(self.client.query_raw(query, params))?;
+        Ok(RowIter::new(self.connection.as_ref(), stream))
+    }
+
+    /// Like `query`, but requires the types of query parameters to be explicitly specified.
+    ///
+    /// Compared to `query`, this method allows performing queries without three round trips (for
+    /// prepare, execute, and close) by requiring the caller to specify parameter values along with
+    /// their Postgres type. Thus, this is suitable in environments where prepared statements aren't
+    /// supported (such as Cloudflare Workers with Hyperdrive).
+    ///
+    /// A statement may contain parameters, specified by `$n`, where `n` is the index of the
+    /// parameter of the list provided, 1-indexed.
+    pub fn query_typed(
+        &mut self,
+        query: &str,
+        params: &[(&(dyn ToSql + Sync), Type)],
+    ) -> Result<Vec<Row>, Error> {
+        self.connection
+            .block_on(self.client.query_typed(query, params))
+    }
+
+    /// The maximally flexible version of [`query_typed`].
+    ///
+    /// Compared to `query`, this method allows performing queries without three round trips (for
+    /// prepare, execute, and close) by requiring the caller to specify parameter values along with
+    /// their Postgres type. Thus, this is suitable in environments where prepared statements aren't
+    /// supported (such as Cloudflare Workers with Hyperdrive).
+    ///
+    /// A statement may contain parameters, specified by `$n`, where `n` is the index of the
+    /// parameter of the list provided, 1-indexed.
+    ///
+    /// [`query_typed`]: #method.query_typed
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # use postgres::{Client, NoTls};
+    /// use postgres::types::{ToSql, Type};
+    /// use fallible_iterator::FallibleIterator;
+    /// # fn main() -> Result<(), postgres::Error> {
+    /// # let mut client = Client::connect("host=localhost user=postgres", NoTls)?;
+    ///
+    /// let params: Vec<(String, Type)> = vec![
+    ///     ("first param".into(), Type::TEXT),
+    ///     ("second param".into(), Type::TEXT),
+    /// ];
+    /// let mut it = client.query_typed_raw(
+    ///     "SELECT foo FROM bar WHERE biz = $1 AND baz = $2",
+    ///     params,
+    /// )?;
+    ///
+    /// while let Some(row) = it.next()? {
+    ///     let foo: i32 = row.get("foo");
+    ///     println!("foo: {}", foo);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn query_typed_raw<P, I>(&mut self, query: &str, params: I) -> Result<RowIter<'_>, Error>
+    where
+        P: BorrowToSql,
+        I: IntoIterator<Item = (P, Type)>,
+    {
+        let stream = self
+            .connection
+            .block_on(self.client.query_typed_raw(query, params))?;
         Ok(RowIter::new(self.connection.as_ref(), stream))
     }
 

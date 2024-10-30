@@ -95,6 +95,7 @@ where
 }
 
 /// A row of data returned from the database by a query.
+#[derive(Clone)]
 pub struct Row {
     statement: Statement,
     body: DataRowBody,
@@ -141,6 +142,7 @@ impl Row {
     /// # Panics
     ///
     /// Panics if the index is out of bounds or if the value cannot be converted to the specified type.
+    #[track_caller]
     pub fn get<'a, I, T>(&'a self, idx: I) -> T
     where
         I: RowIndex + fmt::Display,
@@ -196,6 +198,7 @@ impl AsName for SimpleColumn {
 }
 
 /// A row of data returned from the database by a simple query.
+#[derive(Debug)]
 pub struct SimpleQueryRow {
     columns: Arc<[SimpleColumn]>,
     body: DataRowBody,
@@ -238,6 +241,7 @@ impl SimpleQueryRow {
     /// # Panics
     ///
     /// Panics if the index is out of bounds or if the value cannot be converted to the specified type.
+    #[track_caller]
     pub fn get<I>(&self, idx: I) -> Option<&str>
     where
         I: RowIndex + fmt::Display,
