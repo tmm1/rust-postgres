@@ -1,17 +1,21 @@
 use crate::client::{InnerClient, Responses};
 use crate::codec::FrontendMessage;
 use crate::connection::RequestMessages;
+use crate::prepare::get_type;
 use crate::types::{BorrowToSql, IsNull};
-use crate::{Error, Portal, Row, Statement};
+use crate::{Column, Error, Portal, Row, Statement};
 use bytes::{Bytes, BytesMut};
+use fallible_iterator::FallibleIterator;
 use futures_util::{ready, Stream};
 use log::{debug, log_enabled, Level};
 use pin_project_lite::pin_project;
-use postgres_protocol::message::backend::Message;
+use postgres_protocol::message::backend::{CommandCompleteBody, Message};
 use postgres_protocol::message::frontend;
+use postgres_types::Type;
 use std::fmt;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 struct BorrowToSqlParamsDebug<'a, T>(&'a [T]);
@@ -52,8 +56,71 @@ where
     Ok(RowStream {
         statement,
         responses,
+        rows_affected: None,
         _p: PhantomPinned,
     })
+}
+
+pub async fn query_typed<'a, P, I>(
+    client: &Arc<InnerClient>,
+    query: &str,
+    params: I,
+) -> Result<RowStream, Error>
+where
+    P: BorrowToSql,
+    I: IntoIterator<Item = (P, Type)>,
+{
+    let buf = {
+        let params = params.into_iter().collect::<Vec<_>>();
+        let param_oids = params.iter().map(|(_, t)| t.oid()).collect::<Vec<_>>();
+
+        client.with_buf(|buf| {
+            frontend::parse("", query, param_oids.into_iter(), buf).map_err(Error::parse)?;
+            encode_bind_raw("", params, "", buf)?;
+            frontend::describe(b'S', "", buf).map_err(Error::encode)?;
+            frontend::execute("", 0, buf).map_err(Error::encode)?;
+            frontend::sync(buf);
+
+            Ok(buf.split().freeze())
+        })?
+    };
+
+    let mut responses = client.send(RequestMessages::Single(FrontendMessage::Raw(buf)))?;
+
+    loop {
+        match responses.next().await? {
+            Message::ParseComplete | Message::BindComplete | Message::ParameterDescription(_) => {}
+            Message::NoData => {
+                return Ok(RowStream {
+                    statement: Statement::unnamed(vec![], vec![]),
+                    responses,
+                    rows_affected: None,
+                    _p: PhantomPinned,
+                });
+            }
+            Message::RowDescription(row_description) => {
+                let mut columns: Vec<Column> = vec![];
+                let mut it = row_description.fields();
+                while let Some(field) = it.next().map_err(Error::parse)? {
+                    let type_ = get_type(client, field.type_oid()).await?;
+                    let column = Column {
+                        name: field.name().to_string(),
+                        table_oid: Some(field.table_oid()).filter(|n| *n != 0),
+                        column_id: Some(field.column_id()).filter(|n| *n != 0),
+                        r#type: type_,
+                    };
+                    columns.push(column);
+                }
+                return Ok(RowStream {
+                    statement: Statement::unnamed(vec![], columns),
+                    responses,
+                    rows_affected: None,
+                    _p: PhantomPinned,
+                });
+            }
+            _ => return Err(Error::unexpected_message()),
+        }
+    }
 }
 
 pub async fn query_portal(
@@ -72,8 +139,22 @@ pub async fn query_portal(
     Ok(RowStream {
         statement: portal.statement().clone(),
         responses,
+        rows_affected: None,
         _p: PhantomPinned,
     })
+}
+
+/// Extract the number of rows affected from [`CommandCompleteBody`].
+pub fn extract_row_affected(body: &CommandCompleteBody) -> Result<u64, Error> {
+    let rows = body
+        .tag()
+        .map_err(Error::parse)?
+        .rsplit(' ')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap_or(0);
+    Ok(rows)
 }
 
 pub async fn execute<P, I>(
@@ -104,14 +185,7 @@ where
         match responses.next().await? {
             Message::DataRow(_) => {}
             Message::CommandComplete(body) => {
-                rows = body
-                    .tag()
-                    .map_err(Error::parse)?
-                    .rsplit(' ')
-                    .next()
-                    .unwrap()
-                    .parse()
-                    .unwrap_or(0);
+                rows = extract_row_affected(&body)?;
             }
             Message::EmptyQueryResponse => rows = 0,
             Message::ReadyForQuery(_) => return Ok(rows),
@@ -156,30 +230,42 @@ where
     I: IntoIterator<Item = P>,
     I::IntoIter: ExactSizeIterator,
 {
-    let param_types = statement.params();
     let params = params.into_iter();
+    if params.len() != statement.params().len() {
+        return Err(Error::parameters(params.len(), statement.params().len()));
+    }
 
-    assert!(
-        param_types.len() == params.len(),
-        "expected {} parameters but got {}",
-        param_types.len(),
-        params.len()
-    );
+    encode_bind_raw(
+        statement.name(),
+        params.zip(statement.params().iter().cloned()),
+        portal,
+        buf,
+    )
+}
 
+fn encode_bind_raw<P, I>(
+    statement_name: &str,
+    params: I,
+    portal: &str,
+    buf: &mut BytesMut,
+) -> Result<(), Error>
+where
+    P: BorrowToSql,
+    I: IntoIterator<Item = (P, Type)>,
+    I::IntoIter: ExactSizeIterator,
+{
     let (param_formats, params): (Vec<_>, Vec<_>) = params
-        .zip(param_types.iter())
-        .map(|(p, ty)| (p.borrow_to_sql().encode_format(ty) as i16, p))
+        .into_iter()
+        .map(|(p, ty)| (p.borrow_to_sql().encode_format(&ty) as i16, (p, ty)))
         .unzip();
-
-    let params = params.into_iter();
 
     let mut error_idx = 0;
     let r = frontend::bind(
         portal,
-        statement.name(),
+        statement_name,
         param_formats,
-        params.zip(param_types).enumerate(),
-        |(idx, (param, ty)), buf| match param.borrow_to_sql().to_sql_checked(ty, buf) {
+        params.into_iter().enumerate(),
+        |(idx, (param, ty)), buf| match param.borrow_to_sql().to_sql_checked(&ty, buf) {
             Ok(IsNull::No) => Ok(postgres_protocol::IsNull::No),
             Ok(IsNull::Yes) => Ok(postgres_protocol::IsNull::Yes),
             Err(e) => {
@@ -202,6 +288,7 @@ pin_project! {
     pub struct RowStream {
         statement: Statement,
         responses: Responses,
+        rows_affected: Option<u64>,
         #[pin]
         _p: PhantomPinned,
     }
@@ -217,12 +304,22 @@ impl Stream for RowStream {
                 Message::DataRow(body) => {
                     return Poll::Ready(Some(Ok(Row::new(this.statement.clone(), body)?)))
                 }
-                Message::EmptyQueryResponse
-                | Message::CommandComplete(_)
-                | Message::PortalSuspended => {}
+                Message::CommandComplete(body) => {
+                    *this.rows_affected = Some(extract_row_affected(&body)?);
+                }
+                Message::EmptyQueryResponse | Message::PortalSuspended => {}
                 Message::ReadyForQuery(_) => return Poll::Ready(None),
                 _ => return Poll::Ready(Some(Err(Error::unexpected_message()))),
             }
         }
+    }
+}
+
+impl RowStream {
+    /// Returns the number of rows affected by the query.
+    ///
+    /// This function will return `None` until the stream has been exhausted.
+    pub fn rows_affected(&self) -> Option<u64> {
+        self.rows_affected
     }
 }

@@ -1,24 +1,31 @@
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use std::iter;
-use syn::{Data, DataStruct, DeriveInput, Error, Fields, Ident};
+use syn::{
+    Data, DataStruct, DeriveInput, Error, Fields, Ident, TraitBound, TraitBoundModifier,
+    TypeParamBound,
+};
 
 use crate::accepts;
 use crate::composites::Field;
+use crate::composites::{append_generic_bound, new_derive_path};
 use crate::enums::Variant;
 use crate::overrides::Overrides;
 
 pub fn expand_derive_tosql(input: DeriveInput) -> Result<TokenStream, Error> {
-    let overrides = Overrides::extract(&input.attrs)?;
+    let overrides = Overrides::extract(&input.attrs, true)?;
 
-    if overrides.name.is_some() && overrides.transparent {
+    if (overrides.name.is_some() || overrides.rename_all.is_some()) && overrides.transparent {
         return Err(Error::new_spanned(
             &input,
-            "#[postgres(transparent)] is not allowed with #[postgres(name = \"...\")]",
+            "#[postgres(transparent)] is not allowed with #[postgres(name = \"...\")] or #[postgres(rename_all = \"...\")]",
         ));
     }
 
-    let name = overrides.name.unwrap_or_else(|| input.ident.to_string());
+    let name = overrides
+        .name
+        .clone()
+        .unwrap_or_else(|| input.ident.to_string());
 
     let (accepts_body, to_sql_body) = if overrides.transparent {
         match input.data {
@@ -37,16 +44,36 @@ pub fn expand_derive_tosql(input: DeriveInput) -> Result<TokenStream, Error> {
                 ));
             }
         }
+    } else if overrides.allow_mismatch {
+        match input.data {
+            Data::Enum(ref data) => {
+                let variants = data
+                    .variants
+                    .iter()
+                    .map(|variant| Variant::parse(variant, overrides.rename_all))
+                    .collect::<Result<Vec<_>, _>>()?;
+                (
+                    accepts::enum_body(&name, &variants, overrides.allow_mismatch),
+                    enum_body(&input.ident, &variants),
+                )
+            }
+            _ => {
+                return Err(Error::new_spanned(
+                    input,
+                    "#[postgres(allow_mismatch)] may only be applied to enums",
+                ));
+            }
+        }
     } else {
         match input.data {
             Data::Enum(ref data) => {
                 let variants = data
                     .variants
                     .iter()
-                    .map(Variant::parse)
+                    .map(|variant| Variant::parse(variant, overrides.rename_all))
                     .collect::<Result<Vec<_>, _>>()?;
                 (
-                    accepts::enum_body(&name, &variants),
+                    accepts::enum_body(&name, &variants, overrides.allow_mismatch),
                     enum_body(&input.ident, &variants),
                 )
             }
@@ -65,7 +92,7 @@ pub fn expand_derive_tosql(input: DeriveInput) -> Result<TokenStream, Error> {
                 let fields = fields
                     .named
                     .iter()
-                    .map(Field::parse)
+                    .map(|field| Field::parse(field, overrides.rename_all))
                     .collect::<Result<Vec<_>, _>>()?;
                 (
                     accepts::composite_body(&name, "ToSql", &fields),
@@ -82,8 +109,10 @@ pub fn expand_derive_tosql(input: DeriveInput) -> Result<TokenStream, Error> {
     };
 
     let ident = &input.ident;
+    let generics = append_generic_bound(input.generics.to_owned(), &new_tosql_bound());
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let out = quote! {
-        impl postgres_types::ToSql for #ident {
+        impl#impl_generics postgres_types::ToSql for #ident#ty_generics #where_clause {
             fn to_sql(&self,
                       _type: &postgres_types::Type,
                       buf: &mut postgres_types::private::BytesMut)
@@ -180,4 +209,13 @@ fn composite_body(fields: &[Field]) -> TokenStream {
 
         std::result::Result::Ok(postgres_types::IsNull::No)
     }
+}
+
+fn new_tosql_bound() -> TypeParamBound {
+    TypeParamBound::Trait(TraitBound {
+        lifetimes: None,
+        modifier: TraitBoundModifier::None,
+        paren_token: None,
+        path: new_derive_path(Ident::new("ToSql", Span::call_site()).into()),
+    })
 }
