@@ -496,6 +496,29 @@ impl Client {
         query::execute(self.inner(), statement, params).await
     }
 
+    /// Executes a query directly, without using a named prepared statement, returning the number of rows modified.
+    ///
+    /// If the statement does not modify any rows (e.g. `SELECT`), 0 is returned.
+    pub async fn execute_typed(
+        &self,
+        query: &str,
+        params: &[(&(dyn ToSql + Sync), Type)],
+    ) -> Result<u64, Error> {
+        self.execute_typed_raw(query, params.iter().map(|(v, t)| (*v, t.clone())))
+            .await
+    }
+
+    /// The maximally flexible version of [`execute_typed`].
+    ///
+    /// [`execute_typed`]: #method.execute_typed
+    pub async fn execute_typed_raw<P, I>(&self, query: &str, params: I) -> Result<u64, Error>
+    where
+        P: BorrowToSql,
+        I: IntoIterator<Item = (P, Type)>,
+    {
+        query::execute_typed(&self.inner, query, params).await
+    }
+
     /// Executes a `COPY FROM STDIN` statement, returning a sink used to write the copy data.
     ///
     /// PostgreSQL does not support parameters in `COPY` statements, so this method does not take any. The copy *must*
